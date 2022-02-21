@@ -49,7 +49,7 @@ def preprocess_all_indicators(indic,L,keys):
 
 def shuffle_seeded(a,seed=None):
     """ Shuffle the array a along first axis where the shuffling follows the given seed.
-        This provides a compatible shuffling along multiple calls with the same seed.
+        This provides a compatible shuffling among multiple calls with the same seed.
         If no seed is provided, this functions reduces to np.random.shuffle()
     """
     if seed is None:
@@ -334,6 +334,10 @@ def coefficient_of_determination(model,L=None,reduce_energies=False,key="test",t
     if data["estimation"] is None:
         # perform the estimation step if not previously done
         model.estimate(key)
+    else:
+        # check for right key in estimation data
+        if data["estimation"]["key"] != key:
+            model.estimate(key)
     
     h = data[key]["h"]
     hcorr = data[key]["hcorr"]

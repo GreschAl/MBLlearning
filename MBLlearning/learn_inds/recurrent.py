@@ -132,7 +132,10 @@ def get_LSTM_data(data,seq_division=None,append_chain_size=False):
     """ Transform input vector [h1, h2, h3, ... ] into [ [h1,h2,h3], [h2,h3,h4], ... ] + periodic boundary conditions.
         Size of the division is specified by seq_division. If not provided, default to 1, i.e. [ [h1], [h2], ... ]
         If append_chain_size is True (not by default), appends the corresponding chain length to data as well
+        If seq_division is set to "conv", a simple reshape is performed
     """
+    if seq_division == "conv":
+        return data[...,np.newaxis,:]
     N = data.shape[1]
     if seq_division is None or seq_division==1:
         out = data.reshape((-1,N,1))
@@ -152,7 +155,8 @@ def get_LSTM_data(data,seq_division=None,append_chain_size=False):
     return out
 
 def load_lstm_TensorDataset(data,L,Lmax=-1,seq_division=None,key="train",
-                            dangling_params=None,append_chain_size=False,single_inds=None):
+                            dangling_params=None,append_chain_size=False,
+                            single_inds=None,sort_by_energy=None,energies=None):
     """ Provide data from a dictionary to be transformed into data readible by a recurrent net.
         If single_inds is provided (not by default), puts only those indicators into the data loader.
         if Lmax is provided, check whether the given L is smaller and append 0 at the sequence end
@@ -170,6 +174,20 @@ def load_lstm_TensorDataset(data,L,Lmax=-1,seq_division=None,key="train",
             inds_train = inds_train.reshape((-1,1)) # for training compability, keep second axis
     lstm_train = get_LSTM_data(hvals_train,seq_division=seq_division,append_chain_size=append_chain_size)
     
+    if sort_by_energy is not None:
+        # append energy-wise if a sorting function is provided and len(single_inds)!=1
+        if inds_train.shape[1] == len(energies):
+            inds_train = inds_train.T[:,:,np.newaxis]
+        else:
+            inds_train = sort_by_energy(inds_train)
+        # gather the corresponding energy densities in one list
+        in_energies = ( np.ones((len(energies),inds_train.shape[1])) * energies[:,np.newaxis] ).reshape((-1,1))
+        inds_train = inds_train.reshape((-1,inds_train.shape[-1]))
+        # repeat the input data for each energy in energies
+        lstm_train = np.repeat(lstm_train.reshape((1,*lstm_train.shape)),len(energies),axis=0)
+        lstm_train = lstm_train.reshape((-1,*lstm_train.shape[2:]))
+    
+    
     print(key,"data shape before padding:",lstm_train.shape)
     # trick comes here
     if L<Lmax:
@@ -177,14 +195,17 @@ def load_lstm_TensorDataset(data,L,Lmax=-1,seq_division=None,key="train",
         # pad zeros s.t. shape(hvals) = (N_train,L,len_seq) --> (N_train,L_max,len_seq)
         lstm_train = np.pad(lstm_train,((0,0),(0,L_diff),(0,0)),"constant",constant_values=0)
         print("L changed from",L,"to",Lmax)
-        L = Lmax # only temporarily redefined for the in_len definition
+        #L = Lmax # only temporarily redefined for the in_len definition
     print(key,"data shape after padding:",lstm_train.shape)
     
     inputs = torch.tensor(lstm_train)
     target = torch.tensor(inds_train)
     in_len = torch.tensor(np.ones((len(lstm_train)))*L,dtype=torch.int32)
     if dangling_params is None:
-        data_train = TensorDataset(inputs,target,in_len)
+        if sort_by_energy is not None:
+            data_train = TensorDataset(inputs,target,in_len,torch.tensor(in_energies))
+        else:
+            data_train = TensorDataset(inputs,target,in_len)
     else:
         hcorr_train = data[key]["hcorr"]
         hmin, hmax = dangling_params["hmin"], dangling_params["hmax"]
@@ -203,7 +224,8 @@ def load_lstm_TensorDataset(data,L,Lmax=-1,seq_division=None,key="train",
     return data_train, len(inds_train)
 
 def get_lstm_concatenated(data,L_vals,batchsize=64,seq_division=None,key="train",
-                          dangling_params=None,append_chain_size=False,single_inds=None):
+                          dangling_params=None,append_chain_size=False,single_inds=None,
+                          sort_by_energy=None,energies=None):
     """ Constructs one loader of the data from all the specified chain lengths.
         If single_inds is provided (not by default), puts only those indicators into the data loader.
     """
@@ -213,13 +235,65 @@ def get_lstm_concatenated(data,L_vals,batchsize=64,seq_division=None,key="train"
     for L in L_vals:
         assert data[L][key] is not None, "Please provide {} data first!".format(key)
         temp_train, len_train = load_lstm_TensorDataset(data[L],L,L_max,seq_division,key,
-                                                        dangling_params,append_chain_size,single_inds)
+                                                        dangling_params,append_chain_size,
+                                                        single_inds,sort_by_energy=sort_by_energy,energies=energies)
         datalist_train.append(temp_train)
         #N_train += len_train
     data_train = ConcatDataset(datalist_train)
     
     loader_train = DataLoader(data_train, batch_size=batchsize, shuffle=True)
     return loader_train
+
+def get_lstm_energies(data,L_vals,energies,batchsize=64,key="train",single_inds=None,
+                          sort_by_energy=None,eps_shift=0,eps_scale=1):
+    """ Constructs one loader of the data from all the specified chain lengths.
+        If single_inds is provided (not by default), puts only those indicators into the data loader.
+    """
+    datalist_train = []
+    for L in L_vals:
+        assert data[L][key] is not None, "Please provide {} data first!".format(key)
+        temp_train, _ = load_lstm_energies_TensorDataset(data[L],energies,eps_shift,eps_scale,key,
+                                                         single_inds,sort_by_energy=sort_by_energy)
+        datalist_train.append(temp_train)
+    data_train = ConcatDataset(datalist_train)
+    
+    loader_train = DataLoader(data_train, batch_size=batchsize, shuffle=True)
+    return loader_train
+
+def load_lstm_energies_TensorDataset(data,energies,shift,scale,key="train",single_inds=None,sort_by_energy=None):
+    """ Provide data from a dictionary to be transformed into data readible by the neural net.
+        If single_inds is provided (not by default), puts only those indicators into the data loader.
+    """
+    lstm_train = data[key]["features"]
+    inds_train  = data[key]["inds"]
+    
+    if single_inds is not None:
+        # data is of form N_samples x N_inds
+        inds_train = inds_train[:,single_inds]
+        if len(single_inds)==1:
+            inds_train = inds_train.reshape((-1,1)) # for training compability, keep second axis
+    
+    if sort_by_energy is not None:
+        # append energy-wise if a sorting function is provided and len(single_inds)!=1
+        if inds_train.shape[1] == len(energies):
+            inds_train = inds_train.T[:,:,np.newaxis]
+        else:
+            inds_train = sort_by_energy(inds_train)
+        # gather the corresponding energy densities in one list
+        in_energies = ( np.ones((len(energies),inds_train.shape[1])) * energies[:,np.newaxis] ).reshape((-1,1))
+        inds_train = inds_train.reshape((-1,inds_train.shape[-1]))
+        # repeat the input data for each energy in energies
+        lstm_train = np.repeat(lstm_train.reshape((1,*lstm_train.shape)),len(energies),axis=0)
+        lstm_train = lstm_train.reshape((-1,*lstm_train.shape[2:]))
+        
+        in_energies = scale*(in_energies - shift)
+        lstm_train = np.hstack((lstm_train,in_energies))
+    
+    inputs = torch.tensor(lstm_train)
+    target = torch.tensor(inds_train)
+    data_train = TensorDataset(inputs,target)
+    
+    return data_train, len(inds_train)
 
 def get_data_from_loader(loader):
     ins, outs, lens = next(iter(loader))

@@ -4,19 +4,68 @@
 ##################################################################################################
 
 import numpy as np
+from torch import from_numpy, full
 import matplotlib.pyplot as plt
 plt.rcParams.update({
     "text.usetex": True })
 plt.rc('font', family='serif')
-
-import fssa
+plt.style.use('tableau-colorblind10')
 
 from MBLlearning.utils.data import get_avg, coefficient_of_determination
+from MBLlearning.learn_inds.recurrent import get_LSTM_data
 from MBLlearning.global_config import diction
 
 ##################################################################################################
 
-def plot_inds(net,label_idxs=[0,1,2],eps_idx=9,savename=None,L_vals=None):
+def plot_features_all(net,key="test",show_std=False,savename=None,show_plot=False):
+    """ Plots the feature(s) produced by the RNN for the available data at various chain lengths at once.
+        If show_std set to True (not by default) displays the single standard deviation, otherwise the error on the mean.
+        If savename is provided, saves the images to file.
+    """
+    features = []
+    for l in net.Lvals:
+        h, hcorr, feat = net.get_features(l,key)
+        temp = []
+        for hc in h:
+            keep = hcorr == hc
+            temp.append(feat[keep])
+        features.append(np.array(temp))
+    features = np.array(features)
+    means, stds = np.mean(features,axis=-2), np.std(features,axis=-2)/np.sqrt(features.shape[-2])
+    
+    N = means.shape[-1]
+    assert N < 10, "Cannot plot features for a feature size of 10 or above."
+    #plt.figure(figsize=(6,8))
+    for n in range(N):
+        # go over each feature
+        plt.subplot(100*(N//2)+20+1+n)
+        for mean,std,l in zip(means,stds,net.Lvals):
+            if l == 14:
+                plt.plot([],[])
+            if show_std:
+                plt.errorbar(h,mean[...,n],yerr=std[...,n],label="$L = {}$".format(l))
+            else:
+                plt.plot(h,mean[...,n],label="$L = {}$".format(l))
+        if n == 1:
+            plt.legend(fontsize="x-large")
+        plt.ylabel("Feature value",fontsize="x-large")
+        if n%2==1:
+            # set right yticks to right side
+            plt.gca().yaxis.set_label_position("right")
+            plt.gca().yaxis.set_ticks_position("right")
+        plt.yticks(fontsize="x-large")
+        plt.xticks(fontsize="x-large")
+        plt.xlabel("Disorder parameter $h$",fontsize="x-large")
+    plt.subplots_adjust(wspace=0.05)
+    if savename is not None:
+        plt.savefig(savename+"_mean.pdf",orientation="landscape",dpi=600,bbox_inches="tight")
+    if show_plot:
+        plt.show()
+    else:
+        plt.close()
+    return
+
+def plot_inds(net,label_idxs=[0,1,2],eps_idx=9,savename=None,L_vals=None,show_plot=False):
     for L in net.Lvals:
         h, singlescores, targets = net.predict_energy_wise(L)
         
@@ -29,19 +78,16 @@ def plot_inds(net,label_idxs=[0,1,2],eps_idx=9,savename=None,L_vals=None):
         plt.figure(figsize=(8,6))
         use_even = np.arange(len(h))%2==0
         use_odd  = np.bitwise_not(use_even)
-        for i,idx in enumerate(label_idxs):
-            plt.subplot(221+i)
-            plt.errorbar(h[use_even],scores[eps_idx,use_even,i],
-                         yerr=std[eps_idx,use_even,i],fmt="r.",label="Estimation")
-            plt.errorbar(h[use_odd],means[eps_idx,use_odd,i],
-                         yerr=stds[eps_idx,use_odd,i],fmt="b.",label="Exact diagonalization")        
-            if i==2:
-                plt.xticks(np.arange(2,16,2),fontsize="x-large")
+        for n,idx in enumerate(label_idxs):
+            i = [2,0,1][n]
+            ax = plt.subplot(221+i)
+            plt.errorbar(h[use_even],scores[eps_idx,use_even,n],
+                         yerr=std[eps_idx,use_even,n],marker=".",linewidth=0,elinewidth=2,label="Estimation")
+            plt.errorbar(h[use_odd],means[eps_idx,use_odd,n],
+                         yerr=stds[eps_idx,use_odd,n],marker=".",linewidth=0,elinewidth=2,label="Exact diagonalization")        
+            if i!=0:
                 plt.xlabel("Disorder parameter $h$",fontsize="xx-large")
-            elif i==1:
-                plt.xticks(np.arange(2,16,2),fontsize="x-large")
-            else:
-                plt.xticks(np.arange(2,16,2),[])
+            plt.xticks(np.arange(2,16,2),fontsize="x-large")
             #plt.text(*numberpos[i],chr(ord('a')+i)+")",fontsize=22)
             plt.grid()
             plt.xlim(1,15)
@@ -53,629 +99,481 @@ def plot_inds(net,label_idxs=[0,1,2],eps_idx=9,savename=None,L_vals=None):
             plt.yticks(fontsize="x-large")
             plt.ylabel(diction[idx],fontsize="xx-large")
             if i==2:
-                plt.legend(bbox_to_anchor=[1.9,0.65],fontsize="large")
+                plt.legend(bbox_to_anchor=[2.1,0.65],fontsize="x-large")
         
-        plt.subplots_adjust(wspace=0.05,hspace=0.1)
+        plt.subplots_adjust(wspace=0.05,hspace=0.2)
         if savename is not None:
             plt.savefig(savename.format(L)+".pdf",orientation="landscape",dpi=600,bbox_inches="tight")
-        plt.show()
-    return
-
-def plot_inds_extrapolation(net,L_extra,epsilons,label_idxs=[0,1,2],eps_idxs=[0,9,18],savename=None):
-    data = (net.data).copy()
-    for L in L_extra:
-        try:
-            # check whether data is already loaded 
-            h, singlescores, targets = net.predict_energy_wise(L)
-        except:
-            # if not, recreate trial disorder instances to be predicted by the network
-            data_test_far = {"h":np.arange(0.5,15.1,0.5)}
-            h_i_vals = []
-            hcorrect = []
-            inds_fake = []
-            for h in data_test_far["h"]:
-                realization = np.random.rand(1000,L)*2*h-h
-                h_i_vals.append(realization)
-                hcorrect.append(np.ones(1000)*h)
-                inds_fake.append(np.zeros((1000,net.N_inds*len(net.energies))))
-            data_test_far["h_i"] =  np.array(h_i_vals).reshape((-1,L))
-            data_test_far["inds"] =  np.array(inds_fake).reshape((-1,net.N_inds*len(net.energies)))
-            data_test_far["hcorr"] = np.array(hcorrect).flatten()
-
-            net.data[L] = { "train": None, "test": data_test_far, "estimation": None, "parameters": None }
-            h, singlescores, _ = net.predict_energy_wise(L)
-            
-            # average scores over disorder realizations
-            scores = np.mean(singlescores,axis=2)
-            std = np.std(singlescores,axis=2)
-
-            plt.figure(figsize=(8,6))
-            for i,idx in enumerate(label_idxs):
-                plt.subplot(221+i)
-                for fmts,eps_idx in zip( ("r.","g.","b."), eps_idxs ):
-                    plt.errorbar(h,scores[eps_idx,:,i],
-                                 yerr=std[eps_idx,:,i],
-                                 fmt=fmts,label="$\epsilon$ = {} (est.)".format(epsilons[eps_idx]))
-                    if i==2:
-                        plt.xticks(np.arange(2,16,2),fontsize="x-large")
-                        plt.xlabel("Disorder parameter $h$",fontsize="xx-large")
-                    elif i==1:
-                        plt.xticks(np.arange(2,16,2),fontsize="x-large")
-                    else:
-                        plt.xticks(np.arange(2,16,2),[])
-                    #plt.text(*numberpos[i],chr(ord('a')+i)+")",fontsize=22)
-                    plt.grid()
-                    plt.xlim(1,15)
-                    #plt.ylim(ylims_dict[i])
-                    if i%2==1:
-                        # set right yticks to right side
-                        plt.gca().yaxis.set_label_position("right")
-                        plt.gca().yaxis.set_ticks_position("right")
-                    plt.yticks(fontsize="x-large")
-                    plt.ylabel(diction[idx],fontsize="xx-large")
-                    if i==2:
-                        plt.legend(bbox_to_anchor=[1.9,0.65],fontsize="large")
+        if show_plot:
+            plt.show()
         else:
-            # average scores over disorder realizations
-            scores = np.mean(singlescores,axis=2)
-            std = np.std(singlescores,axis=2)
-
-            h, means, stds, _ = get_avg(net,L)
-
-            plt.figure(figsize=(8,6))
-            use_even = np.arange(len(h))%2==0
-            use_odd  = np.bitwise_not(use_even)
-            for i,idx in enumerate(label_idxs):
-                plt.subplot(221+i)
-                for fmts,eps_idx in zip( ( ("r.","c."),("g.","y."),("b.","m.") ), eps_idxs ):
-                    plt.errorbar(h[use_even],scores[eps_idx,use_even,i],
-                                 yerr=std[eps_idx,use_even,i],
-                                 fmt=fmts[0],label="$\epsilon$ = {} (est.)".format(epsilons[eps_idx]))
-                    plt.errorbar(h[use_odd],means[eps_idx,use_odd,i],
-                                 yerr=stds[eps_idx,use_odd,i],
-                                 fmt=fmts[1],label="$\epsilon$ = {} (ED)".format(epsilons[eps_idx]))       
-                    if i==2:
-                        plt.xticks(np.arange(2,16,2),fontsize="x-large")
-                        plt.xlabel("Disorder parameter $h$",fontsize="xx-large")
-                    elif i==1:
-                        plt.xticks(np.arange(2,16,2),fontsize="x-large")
-                    else:
-                        plt.xticks(np.arange(2,16,2),[])
-                    #plt.text(*numberpos[i],chr(ord('a')+i)+")",fontsize=22)
-                    plt.grid()
-                    plt.xlim(1,15)
-                    #plt.ylim(ylims_dict[i])
-                    if i%2==1:
-                        # set right yticks to right side
-                        plt.gca().yaxis.set_label_position("right")
-                        plt.gca().yaxis.set_ticks_position("right")
-                    plt.yticks(fontsize="x-large")
-                    plt.ylabel(diction[idx],fontsize="xx-large")
-                    if i==2:
-                        plt.legend(bbox_to_anchor=[1.9,0.65],fontsize="large")
-
-        plt.subplots_adjust(wspace=0.05,hspace=0.1)
-        if savename is not None:
-            plt.savefig(savename.format(L)+".pdf",orientation="landscape",dpi=600,bbox_inches="tight")
-        plt.show()
-    net.data = data
+            plt.close()
     return
 
-def plot_r2(net,label_idxs=[0,1,2],eps_idx=9,savename=None):
+def plot_r2(net,model_list=None,label_idxs=[0,1,2],eps_idx=9,savename=None,show_plot=False):
+    
+    calc_averages = model_list is not None
     
     plt.figure(figsize=(8,6))
-    for i,idx in enumerate(label_idxs):
-        plt.subplot(221+i)
-        for l in net.Lvals:
-            h = net.data[l]["test"]["h"]
-            r_squared = coefficient_of_determination(net,l,reduce_energies=True,key="test")
-            r_squared = r_squared[eps_idx]
-            r_normed  = 1/(2-r_squared)
-            if l!=14:
-                plt.plot(h,r_normed[:,i],label="L={}".format(l))
-            else:
-                plt.plot(h,r_normed[:,i],linestyle="dashed",label="L={}".format(l))
+    for n,idx in enumerate(label_idxs):
+        i = [2,0,1][n]
+        if not calc_averages:
+            ax = plt.subplot(221+i)
+            for l in net.Lvals:
+                h = net.data[l]["test"]["h"]
+                r_squared = coefficient_of_determination(net,l,reduce_energies=True,key="test")
+                r_squared = r_squared[eps_idx]
+                r_normed  = 1/(2-r_squared)
+                if l!=14:
+                    plt.plot(h,r_normed[:,n],label="L={}".format(l))
+                else:
+                    plt.plot([],[])
+                    plt.plot(h,r_normed[:,n],linestyle="dashed",label="L={}".format(l))
 
-        plt.hlines(0.5,0,16,colors="black",linestyles="dotted")
-        if i==2:
-            plt.xticks(np.arange(2,16,2),fontsize="x-large")
-            plt.xlabel("Disorder parameter $h$",fontsize="xx-large")
-        elif i==1:
-            plt.xticks(np.arange(2,16,2),fontsize="x-large")
+            plt.hlines(0.5,0,16,colors="black",linestyles="dotted")
+            if i!=0:
+                plt.xlabel("Disorder parameter $h$",fontsize="xx-large")
+            plt.xticks(np.arange(1,16,2),fontsize="x-large")
+            if i%2==0:
+                # set right yticks to right side
+                plt.gca().yaxis.set_label_position("right")
+                plt.gca().yaxis.set_ticks_position("right")
+                plt.yticks(fontsize="x-large")
+            else:
+                plt.yticks(np.arange(0,11,2)/10,[])
+            if i==2:
+                plt.ylabel("$R^2_{norm.}$",fontsize="x-large")
+            plt.ylim(0,1)
+            plt.xlim(0,15.5)
+            plt.text(0.65,0.25,diction[idx],fontsize=18,horizontalalignment='center',
+                        verticalalignment='center', transform=ax.transAxes,bbox=dict(facecolor='white', alpha=0.5))
+            if i==2:
+                plt.legend(bbox_to_anchor=[2,0.75],fontsize="xx-large")
         else:
-            plt.xticks(np.arange(2,16,2),[])
-        if i%2==1:
-            # set right yticks to right side
-            plt.gca().yaxis.set_label_position("right")
-            plt.gca().yaxis.set_ticks_position("right")
-        plt.yticks(fontsize="x-large")
-        plt.ylim(0,1)
-        plt.xlim(0,15.5)
-        plt.ylabel("$R^2_{norm.}$(" + diction[idx] +")",fontsize="x-large")
-        if i==2:
-            plt.legend(bbox_to_anchor=[1.8,0.7],fontsize="large")
-    plt.subplots_adjust(wspace=0.05,hspace=0.2)
+            ax = plt.subplot(221+i)
+            for l in net.Lvals:
+                r_norms = []
+                for model_name in model_list:
+                    net.load(model_name)
+                    net.clear_estimates()
+                    h = net.data[l]["test"]["h"]
+                    r_squared = coefficient_of_determination(net,l,reduce_energies=True,key="test")
+                    r_squared = r_squared[eps_idx]
+                    r_normed  = 1/(2-r_squared)
+                    r_norms.append(r_normed[:,n])
+                if l!=14:
+                    plt.plot(h,np.mean(r_norms,axis=0),label="L={}".format(l))
+                else:
+                    plt.plot([],[])
+                    plt.plot(h,np.mean(r_norms,axis=0),linestyle="dashed",label="L={}".format(l))
+
+            plt.hlines(0.5,0,16,colors="black",linestyles="dotted")
+            if i!=0:
+                plt.xlabel("Disorder parameter $h$",fontsize="xx-large")
+            plt.xticks(np.arange(1,16,2),fontsize="x-large")
+            if i%2==0:
+                # set right yticks to right side
+                plt.gca().yaxis.set_label_position("right")
+                plt.gca().yaxis.set_ticks_position("right")
+                plt.yticks(fontsize="x-large")
+            else:
+                plt.yticks(np.arange(0,11,2)/10,[])
+            if i==2:
+                plt.ylabel("$R^2_{norm.}$",fontsize="x-large")
+            plt.ylim(0,1)
+            plt.xlim(0,15.5)
+            plt.text(0.65,0.25,diction[idx],fontsize=18,horizontalalignment='center',
+                        verticalalignment='center', transform=ax.transAxes,bbox=dict(facecolor='white', alpha=0.5))
+            if i==2:
+                plt.legend(bbox_to_anchor=[2,0.75],fontsize="xx-large")
+    plt.subplots_adjust(wspace=0.15,hspace=0.2)
     if savename is not None:
         plt.savefig(savename+".pdf",orientation="landscape",dpi=600,bbox_inches="tight")
-    plt.show()
-    return
-
-def plot_N_train_losses(L,N_trains,N_epochs,prefactor,filename,savename=None):
-    if isinstance(L,int):
-        # load data
-        losses = np.empty((2,len(N_trains)),dtype=object)
-        for k,key in enumerate(["train","test"]):
-            for i,N in enumerate(N_trains):
-                try:
-                    losses[k,i] = np.loadtxt(filename.format(key,L,N))
-                except:
-                    losses[k,i] = None
-                    print("No data for (L,key,N_train) = ({},{},{}) found on file.".format(L,key,N))
-                    print("Aborted plotting. Please provide data first via training")
-                    return
-                    
-        for k,(key,loss) in enumerate(zip(["train","test"],losses)):
-            ax = plt.subplot(121+k)
-            for i,N in enumerate(N_trains):
-                N_e = int(N_trains[-1]*N_epochs/N)
-                num_updates = np.arange(1,N_e+1)*np.ceil(N*prefactor)
-                plt.semilogy(num_updates,np.mean(loss[i],axis=-1),label="N = {}".format(N))
-
-            plt.xlim(0,num_updates[-1])
-            plt.ylim(1e-3,0.3)
-            plt.grid()
-            if k==1:
-                # set right yticks to right side
-                plt.gca().yaxis.set_label_position("right")
-                plt.gca().yaxis.set_ticks_position("right")
-                plt.legend(fontsize="large")
-            else:
-                plt.ylabel("Mean MSE",fontsize="x-large")
-
-            plt.xticks(np.arange(4)*10000, np.arange(4)*10,fontsize="x-large")
-            plt.yticks(fontsize="x-large")            
-            plt.title(key,fontsize="xx-large")
-
-        #plt.suptitle("L = {}".format(l))
-        #plt.xlabel(,fontsize="large")
-        plt.text(0.0,-0.15,"Number of update steps $[\\times 10^3]$",fontsize="xx-large",
-                     horizontalalignment='center',verticalalignment='center', transform=ax.transAxes)
-        plt.subplots_adjust(wspace=0.1)
-        if savename is not None:
-            plt.savefig(savename.format(L)+".pdf",orientation="landscape",dpi=600,bbox_inches="tight")
+    if show_plot:
         plt.show()
-            
-            
     else:
-        # load data
-        losses = np.empty((len(L),2,len(N_trains)),dtype=object)
-        L_are_available = np.zeros(len(L),dtype=bool)
-        for j,l in enumerate(L):
-            for k,key in enumerate(["train","test"]):
-                for i,N in enumerate(N_trains):
-                    try:
-                        losses[j,k,i] = np.loadtxt(filename.format(key,l,N))
-                        L_are_available[j] = True
-                    except:
-                        losses[j,k,i] = None
-                        print("No data for (L,key,N_train) = ({},{},{}) found on file.".format(l,key,N))
-                        print("Skipping plotting. Please provide data first via training")
-        
-        num_L = np.sum(L_are_available)
-        
-        if num_L == 0:
-            print("No eligible chain lengths provided. Stopped plotting")
-            return
-        elif num_L > 4:
-            print("Too many chain lengths provided for a single plot. Provide less than five eligible chain lengths.")
-            print("Stopping plotting after the fourth chain length.")
-            num_L = 4
-    
-        plt.figure(figsize=(6,8*num_L/2))
-        for i,(l,temp) in enumerate(zip(np.array(L)[L_are_available],losses[L_are_available])):
-            # plot up to the fouth available chain lengths
-            if i >= 4:
-                break
-            for k,(key,loss) in enumerate(zip(["train","test"],temp)):
-                ax = plt.subplot(100*num_L+21+k+2*i)
-                for j,N in enumerate(N_trains):
-                    if loss[j] is None:
-                        continue # skip in case of missing data
-                    N_e = int(N_trains[-1]*N_epochs/N)
-                    num_updates = np.arange(1,N_e+1)*np.ceil(N*prefactor)
-                    plt.semilogy(num_updates,np.mean(loss[j],axis=-1),label="N = {}".format(N))
-
-                plt.xlim(0,num_updates[-1])
-                plt.ylim(1e-3,0.3)
-                plt.grid()
-                if k==1:
-                    # set right yticks to right side
-                    plt.gca().yaxis.set_label_position("right")
-                    plt.gca().yaxis.set_ticks_position("right")
-                    if i==1:
-                        plt.legend(fontsize="large")
-                else:
-                    plt.ylabel("Mean MSE",fontsize="x-large")
-
-                if i==num_L-1:
-                    plt.xticks(np.arange(4)*10000, np.arange(4)*10,fontsize="x-large")
-                else:
-                    plt.xticks(np.arange(4)*10000, [],fontsize="x-large")
-                plt.yticks(fontsize="x-large")
-                if i==0:
-                    plt.title(key,fontsize="xx-large")
-
-                plt.text(0.15,0.9,chr(ord("a")+k+2*i)+")",fontsize=22,
-                         horizontalalignment='center',verticalalignment='center', transform=ax.transAxes)
-
-        #plt.suptitle("L = {}".format(l))
-        #plt.xlabel(,fontsize="large")
-        plt.text(0.0,-0.18,"Number of update steps $[\\times 10^3]$",fontsize="xx-large",
-                     horizontalalignment='center',verticalalignment='center', transform=ax.transAxes)
-        plt.subplots_adjust(wspace=0.1,hspace=0.05)
-        if savename is not None:
-            plt.savefig(savename.format("multiples")+".pdf",orientation="landscape",dpi=600,bbox_inches="tight")
-        plt.show()
+        plt.close()
     return
 
-def plot_vanilla_fssa(net,label_idxs=[0,1,2],savename=None):
-    colors = ["green","orange","blue"]
-    epsilons = net.energies
-
-    inds = []
-    dinds = []
-    inds_nn = []
-    dinds_nn = []
-
-    for l in net.Lvals:
-        h, mean, std, N = get_avg(net,L=l,key="test")
-        h, scores, _ = net.predict_energy_wise(l)
-        inds.append(mean)
-        dinds.append(std/np.sqrt(N))
-        inds_nn.append(np.mean(scores,axis=2))
-        dinds_nn.append(np.std(scores,axis=2)/np.sqrt(scores.shape[2]))
-
-    inds = np.array(inds)
-    dinds = np.array(dinds)
-    inds_nn = np.array(inds_nn)
-    dinds_nn = np.array(dinds_nn)
+def plot_N_train_dependency(N_vals,L,prefactor,load_name,N_max=1000,N_epochs=5,num_mins=1,savename=None,show_plot=False):
     
-    fit_params = np.zeros((len(epsilons),len(label_idxs),6)) # three params + errors
+    # load data
+    losses = np.empty((len(L),2,len(N_vals)),dtype=object)
+    L_are_available = np.zeros(len(L),dtype=bool)
+    for j,l in enumerate(L):
+        for k,key in enumerate(["train","test"]):
+            for i,N in enumerate(N_vals):
+                try:
+                    losses[j,k,i] = np.loadtxt(load_name.format(key,l,N))
+                    L_are_available[j] = True
+                except:
+                    losses[j,k,i] = None
+                    print("No data for (L,key,N_train) = ({},{},{}) found on file.".format(l,key,N))
+                    print("Skipping plotting. Please provide data first via training")
     
-    for e,epsilon in enumerate(epsilons):
-        plt.figure(figsize=(8,6))
-        for i,idx in enumerate(label_idxs):
-            # autoscale method
-            m,s = inds[:,e,:,i], dinds[:,e,:,i]
-            result = fssa.autoscale(net.Lvals,h[6:18],m[:,6:18],s[:,6:18],6,1,0.1)
-            m_nn,s_nn = inds_nn[:,e,:,i], dinds[:,e,:,i]
-            
-            if result.success:
-                print("h_c = {:.2f} +/- {:.2f}".format(result.rho,result.drho))
-                print("nu  = {:.2f} +/- {:.2f}".format(result.nu,result.dnu))
-                print("chi = {:.2f} +/- {:.2f}".format(result.zeta,result.dzeta))
-                fit_params[e,i] = np.array([result.rho,result.drho,result.nu,result.dnu,
-                                                result.zeta,result.dzeta])
+    # process data
+    mses = [ [], [] ]
+    for i,(l,temp) in enumerate(zip(L,losses)):
+        # plot up to the fouth available chain lengths
+        mse = []
+        for k,(key,loss) in enumerate(zip(["train","test"],temp)):
+            mse = []
+            for j,N in enumerate(N_vals):
+                N_e = int(np.ceil(N_max*N_epochs/N))
+                num_updates = np.arange(1,N_e+1)*np.ceil(N*prefactor)
+                keep = np.bitwise_and(num_updates >= 1300,num_updates<=1400)
+                means = np.sort(np.median(loss[j][keep],axis=0))
+                mse.append(np.mean(means[:num_mins]))
+            mses[k].append(np.array(mse))
+    mses = np.array(mses)
+
+    # plot data
+    marker = ["o","s","X"]
+    for s,(key,mse_key) in enumerate(zip(["train","test"],mses)):
+        if s == 1:
+            plt.gca().set_prop_cycle(None)
+        for m,l,mse in zip(marker,L,mse_key):
+            label = "$L={}$:".format(l) if s==0 else "train - test"
+            if l == 14:
+                plt.plot([],[])
+            if s==0:
+                plt.semilogx(N_vals,mse,marker=m,linewidth=0,label=label)
             else:
-                print("Autoscale not successful")
-
-            # print scaled data
-            h_crit, nu_crit, chi_crit = result.x
-            data = fssa.scaledata(net.Lvals,h,m,s,*result.x)
-            data_nn = fssa.scaledata(net.Lvals,h,m_nn,s_nn,*result.x)
-
-            plt.subplot(221+i)
-            for j,l in enumerate(net.Lvals):
-                plt.plot(data.x[j],data.y[j],
-                         color=colors[j],marker="x",ls="None",label="L={}".format(l))
-                plt.plot(data_nn.x[j],data_nn.y[j],
-                         color=colors[j],marker=".",ls="None")#,label="L={}, RNN".format(l))
-            
-            plt.xticks(fontsize="x-large")
-            if i>1:
-                plt.xlabel("$L^{1/ \\nu }(h-h_c)$",fontsize="xx-large")
-            if i%2==1:
-                # set right yticks to right side
-                plt.gca().yaxis.set_label_position("right")
-                plt.gca().yaxis.set_ticks_position("right")
-            plt.yticks(fontsize="x-large")
-            plt.ylabel(diction[idx],fontsize="x-large")
-
-            if i==2:
-                plt.legend(bbox_to_anchor=[1.8,0.7],fontsize="x-large")
-        plt.subplots_adjust(wspace=0.05,hspace=0.2)
-
-        if savename is not None:
-            plt.savefig(savename+"_eps_{}.pdf".format(epsilon),
-                        orientation="landscape",dpi=600,bbox_inches="tight")
+                plt.semilogx(N_vals,mse,marker=m,markerfacecolor='none',linewidth=0,label=label)
+    plt.legend(ncol=2,loc="upper right",fontsize="x-large",
+               borderpad=0.4,handletextpad=0.4,columnspacing=0.0,markerfirst=False)
+    plt.ylim(2e-3,8e-3)
+    plt.ylabel("Avg. MSE per sample $\\left[\\times 10^{-3} \\right]$",fontsize="x-large")
+    plt.yticks(np.arange(2,9)/1000,np.arange(2,9),fontsize="x-large")
+    plt.xticks([1,3,10,100],[1,3,10,100],fontsize="x-large")
+    plt.xlabel("$N_{train}$",fontsize="xx-large")
+    plt.vlines(2.5,1e-3,9e-3,colors="black",linestyles="dotted",linewidth=1)
+    plt.grid(axis="y")
+    
+    if savename is not None:
+        plt.savefig(savename+".pdf",orientation="landscape",dpi=600,bbox_inches="tight")
+    if show_plot:   
         plt.show()
-        
-    hc = fit_params[:,:,0].T
-    dhc = fit_params[:,:,1].T
-    nu = fit_params[:,:,2].T
-    dnu = fit_params[:,:,3].T
-    colors = ["red","blue","green"]
+    else:
+        plt.close()
+    return
 
-
-    for j,(data,xlabel,xupper) in enumerate(zip(([hc,dhc],[nu,dnu]),
-                                                ("disorder parameter $h_c$","exponent $\\nu$"),
-                                                (10,4))):
-        estim, destim = data
-        ls = []
-        labels = []
-
-        for i,(idx,color,crit,dcrit) in enumerate(zip(label_idxs,colors,estim,destim)):
-            plt.subplot(131+i)
-            for e,c,dc in zip(epsilons,crit,dcrit):
-                if np.isnan(dc):
-                    plt.scatter(c,e,c="gray")
-                else:
-                    ax = plt.scatter(c,e,c=color)
-                    plt.hlines(e,c-dc,c+dc,colors=color)
-            ls.append(ax)
-            labels.append(diction[idx])
-
-            plt.xlim(0,xupper)
-            plt.xticks(np.arange(0,xupper+1,2),fontsize="large")
-            plt.grid()
-            if i==0:
-                plt.yticks(np.arange(1,10)/10,fontsize="large")
-                plt.ylabel("Energy density $\epsilon$",fontsize="x-large")
-            else:
-                plt.yticks(np.arange(1,10)/10,[])
-            if i==1:
-                plt.xlabel("Estimated critical {}".format(xlabel),fontsize="x-large")
-            #elif i==2:
-                #plt.legend(ls,labels,fontsize="large",bbox_to_anchor=(0.1,0.5))
-            plt.title(diction[idx])
-        plt.subplots_adjust(wspace=0.3)        
-        if savename is not None:
-            plt.savefig(savename+"_fssa_results_{}.pdf".format(j),orientation="landscape",
-                        dpi=600,bbox_inches="tight")
-        plt.show()
-    
-    return fit_params
-
-
-def plot_extrapolated_fssa(net,Lmin=12,Lmax=20,label_idxs=[0,1,2],savename=None):
-    palette = plt.get_cmap('Set1')
-    epsilons = net.energies
-    
-    data_buffer = (net.data).copy()
-    
-    # generate data up to L=Lmax in steps of 2
-    for L in range(Lmin,Lmax+1,2):
-        data_test_far = {"h":np.arange(0.5,15.1,0.5)}
-        h_i_vals = []
-        hcorrect = []
-        inds_fake = []
-        for h in data_test_far["h"]:
-            realization = np.random.rand(1000,L)*2*h-h
-            h_i_vals.append(realization)
-            hcorrect.append(np.ones(1000)*h)
-            inds_fake.append(np.zeros((1000,net.N_inds*len(net.energies))))
-        data_test_far["h_i"] =  np.array(h_i_vals).reshape((-1,L))
-        data_test_far["inds"] =  np.array(inds_fake).reshape((-1,net.N_inds*len(net.energies)))
-        data_test_far["hcorr"] = np.array(hcorrect).flatten()
-
-        net.data[L] = { "train": None, "test": data_test_far, "estimation": None, "parameters": None }
-
-    print("Using L = "+("{},"*len(net.Lvals)).format(*net.Lvals)[:-1])
-    
-    inds_nn = []
-    dinds_nn = []
-
-    for l in range(Lmin,Lmax+1,2):
-        h, scores, _ = net.predict_energy_wise(l)
-        inds_nn.append(np.mean(scores,axis=2))
-        dinds_nn.append(np.std(scores,axis=2)/np.sqrt(scores.shape[2]))
-
-    inds_nn = np.array(inds_nn)
-    dinds_nn = np.array(dinds_nn)
-    
-    fit_params_nn = np.zeros((len(epsilons),len(label_idxs),6)) # three params + errors
-    
-    for e,epsilon in enumerate(epsilons):
-        plt.figure(figsize=(8,6))
-        for i,idx in enumerate(label_idxs):
-            # autoscale method
-            m,s = inds_nn[:,e,:,i], dinds_nn[:,e,:,i]
-            result = fssa.autoscale(range(Lmin,Lmax+1,2),h[6:18],m[:,6:18],s[:,6:18],6,1,0.1)
-            
-            if result.success:
-                print("h_c = {:.2f} +/- {:.2f}".format(result.rho,result.drho))
-                print("nu  = {:.2f} +/- {:.2f}".format(result.nu,result.dnu))
-                print("chi = {:.2f} +/- {:.2f}".format(result.zeta,result.dzeta))
-                fit_params_nn[e,i] = np.array([result.rho,result.drho,result.nu,result.dnu,
-                                                result.zeta,result.dzeta])
-            else:
-                print("Autoscale not successful")
-
-            # print scaled data
-            h_crit, nu_crit, chi_crit = result.x
-            data = fssa.scaledata(range(Lmin,Lmax+1,2),h,m,s,*result.x)
-
-            plt.subplot(221+i)
-            for j,l in enumerate(range(Lmin,Lmax+1,2)):
-                plt.plot(data.x[j],data.y[j],
-                         color=palette(j),marker="x",ls="None",label="L={}".format(l))
-            
-            plt.xticks(fontsize="x-large")
-            if i>1:
-                plt.xlabel("$L^{1/ \\nu }(h-h_c)$",fontsize="xx-large")
-            if i%2==1:
-                # set right yticks to right side
-                plt.gca().yaxis.set_label_position("right")
-                plt.gca().yaxis.set_ticks_position("right")
-            plt.yticks(fontsize="x-large")
-            plt.ylabel(diction[idx],fontsize="x-large")
-
-            if i==2:
-                plt.legend(bbox_to_anchor=[1.8,0.85],fontsize="x-large")
-        plt.subplots_adjust(wspace=0.05,hspace=0.2)
-
-        if savename is not None:
-            plt.savefig(savename+"_eps_{}.pdf".format(epsilon),
-                        orientation="landscape",dpi=600,bbox_inches="tight")
-        plt.show()
-        
-    hc = fit_params_nn[:,:,0].T
-    dhc = fit_params_nn[:,:,1].T
-    nu = fit_params_nn[:,:,2].T
-    dnu = fit_params_nn[:,:,3].T
-    colors = ["red","blue","green"]
-
-
-    for j,(data,xlabel,xupper) in enumerate(zip(([hc,dhc],[nu,dnu]),
-                                                ("disorder parameter $h_c$","exponent $\\nu$"),
-                                                (10,4))):
-        estim, destim = data
-        ls = []
-        labels = []
-
-        for i,(idx,color,crit,dcrit) in enumerate(zip(label_idxs,colors,estim,destim)):
-            plt.subplot(131+i)
-            for e,c,dc in zip(epsilons,crit,dcrit):
-                if np.isnan(dc):
-                    plt.scatter(c,e,c="gray")
-                else:
-                    ax = plt.scatter(c,e,c=color)
-                    plt.hlines(e,c-dc,c+dc,colors=color)
-            ls.append(ax)
-            labels.append(diction[idx])
-
-            plt.xlim(0,xupper)
-            plt.xticks(np.arange(0,xupper+1,2),fontsize="large")
-            plt.grid()
-            if i==0:
-                plt.yticks(np.arange(1,10)/10,fontsize="large")
-                plt.ylabel("Energy density $\epsilon$",fontsize="x-large")
-            else:
-                plt.yticks(np.arange(1,10)/10,[])
-            if i==1:
-                plt.xlabel("Estimated critical {}".format(xlabel),fontsize="x-large")
-            #elif i==2:
-                #plt.legend(ls,labels,fontsize="large",bbox_to_anchor=(0.1,0.5))
-            plt.title(diction[idx])
-        plt.subplots_adjust(wspace=0.3)        
-        if savename is not None:
-            plt.savefig(savename+"_fssa_results_{}.pdf".format(j),orientation="landscape",
-                        dpi=600,bbox_inches="tight")
-        plt.show()
-        
-    net.data = data_buffer
-    
-    return fit_params_nn
-
-def plot_r2_comparison(transfer,net,adversary,transfer_idxs,eps_idx=9,savename=None):
+def plot_r2_comparison(transfer,net,adversary,transfer_idxs,model_names=None,eps_idx=9,savename=None,show_plot=False):
+    """ The arguments (transfer,net,adversary) can either be Approximator-Class of lists thereof.
+        In the latter case, calculates means and standard deviations of the outputs
+    """
+    calc_averages = model_names is not None
     
     plt.figure(figsize=(8,6))
     for idx in transfer_idxs:
-        for i,l in enumerate(net.Lvals):
-            plt.subplot(221+i)
-            ### evaluate baseline neural network trained on all indicators
-            h = net.data[l]["test"]["h"]
-            r_squared = coefficient_of_determination(net,l,reduce_energies=True,key="test")
-            r_squared = r_squared[eps_idx,:,idx]
-            r_normed  = 1/(2-r_squared)
-            if l!=14:
-                plt.plot(h,r_normed,label="multitask")
-            else:
-                plt.plot(h,r_normed,linestyle="dashed")
+        if calc_averages:
+            for i,l in enumerate(net.Lvals):
+                plt.subplot(221+i)
+                ### evaluate baseline neural network trained on all indicators
+                h = net.data[l]["test"]["h"]
+                r_normed = []
+                for net_name in model_names:
+                    net.load(net_name[1])
+                    net.clear_estimates()
+                    r_squared = coefficient_of_determination(net,l,reduce_energies=True,key="test")
+                    r_squared = r_squared[eps_idx,:,idx]
+                    r_normed.append( 1/(2-r_squared) )
+                if l!=14:
+                    plt.plot(h,np.mean(r_normed,axis=0),label="multitask")
+                else:
+                    plt.plot(h,np.mean(r_normed,axis=0),linestyle="dashed")
 
-            ### evaluate adversarial neural network trained on only the transfer indicator
-            h = adversary.data[l]["test"]["h"]
-            r_squared = coefficient_of_determination(adversary,l,reduce_energies=True,key="test")
-            r_squared = r_squared[eps_idx]
-            r_normed  = 1/(2-r_squared)
-            if l!=14:
-                plt.plot(h,r_normed[:,0],label="scratch")
-            else:
-                plt.plot(h,r_normed[:,0],linestyle="dashed")
+                ### evaluate adversarial neural network trained on only the transfer indicator
+                h = adversary.data[l]["test"]["h"]
+                r_normed = []
+                for adv_name in model_names:
+                    adversary.load(adv_name[2])
+                    adversary.clear_estimates()
+                    r_squared = coefficient_of_determination(adversary,l,reduce_energies=True,key="test")
+                    r_squared = r_squared[eps_idx]
+                    temp = 1/(2-r_squared)
+                    r_normed.append( temp[:,0] )
+                if l!=14:
+                    plt.plot(h,np.mean(r_normed,axis=0),label="scratch")
+                else:
+                    plt.plot(h,np.mean(r_normed,axis=0),linestyle="dashed")
+
+                ### evaluate transfer neural network trained in two phases
+                plt.plot([],[]) # for right color
                 
-            ### evaluate transfer neural network trained in two phases
-            h = transfer.data[l]["test"]["h"]
-            r_squared = coefficient_of_determination(transfer,l,reduce_energies=True,
-                                                                key="test",transfer_ind=idx)
-            
-            r_squared = r_squared[:,eps_idx]
-            r_normed  = 1/(2-r_squared)
-            if l!=14:
-                plt.plot(h,r_normed,label="transfer")
-            else:
-                plt.plot(h,r_normed,linestyle="dashed")
+                h = transfer.data[l]["test"]["h"]
+                r_normed = []
+                for transfer_name in model_names:
+                    transfer.load(transfer_name[0])
+                    transfer.clear_estimates()
+                    r_squared = coefficient_of_determination(transfer,l,reduce_energies=True,
+                                                                        key="test",transfer_ind=idx)
+                    r_squared = r_squared[:,eps_idx]
+                    r_normed.append( 1/(2-r_squared) )
+                
+                if l!=14:
+                    plt.plot(h,np.mean(r_normed,axis=0),label="transfer")
+                else:
+                    plt.plot(h,np.mean(r_normed,axis=0),linestyle="dashed")
+                
+                plt.hlines(0.5,0,16,colors="black",linestyles="dotted")
+                if i>0:
+                    plt.xlabel("Disorder parameter $h$",fontsize="xx-large")
+                plt.xticks(np.arange(1,16,2),fontsize="x-large")
+                if i%2==0:
+                    # set right yticks to right side
+                    plt.gca().yaxis.set_label_position("right")
+                    plt.gca().yaxis.set_ticks_position("right")
+                    plt.yticks(fontsize="x-large")
+                else:
+                    plt.yticks(np.arange(0,11,2)/10,[])
+                if i==2:
+                    plt.ylabel("$R^2_{norm.}$",fontsize="x-large")
+                plt.ylim(0,1)
+                plt.xlim(0,15.5)
+                plt.text(10,0.85,"$L={}$".format(l),fontsize="xx-large")
+                if i==1:
+                    plt.legend(bbox_to_anchor=[0.85,-0.45],fontsize="xx-large")
+        else:
+            for i,l in enumerate(net.Lvals):
+                plt.subplot(221+i)
+                ### evaluate baseline neural network trained on all indicators
+                h = net.data[l]["test"]["h"]
+                r_squared = coefficient_of_determination(net,l,reduce_energies=True,key="test")
+                r_squared = r_squared[eps_idx,:,idx]
+                r_normed  = 1/(2-r_squared)
+                if l!=14:
+                    plt.plot(h,r_normed,label="multitask")
+                else:
+                    plt.plot(h,r_normed,linestyle="dashed")
 
-            plt.hlines(0.5,0,16,colors="black",linestyles="dotted")
-            if i>1:
-                plt.xticks(np.arange(2,16,2),fontsize="x-large")
-                plt.xlabel("Disorder parameter $h$",fontsize="xx-large")
-            else:
-                plt.xticks(np.arange(2,16,2),[])
-            if i%2==1:
-                # set right yticks to right side
-                plt.gca().yaxis.set_label_position("right")
-                plt.gca().yaxis.set_ticks_position("right")
-            plt.yticks(fontsize="x-large")
-            plt.ylim(0,1)
-            plt.xlim(0,15.5)
-            plt.ylabel("$R^2_{norm.}$",fontsize="x-large")
-            plt.text(7.5,0.25,"$L={}$".format(l),fontsize="xx-large")
-            if i==1:
-                plt.legend(bbox_to_anchor=[0.65,-0.45],fontsize="x-large")
-    plt.subplots_adjust(wspace=0.2,hspace=0.1)
+                ### evaluate adversarial neural network trained on only the transfer indicator
+                h = adversary.data[l]["test"]["h"]
+                r_squared = coefficient_of_determination(adversary,l,reduce_energies=True,key="test")
+                r_squared = r_squared[eps_idx]
+                r_normed  = 1/(2-r_squared)
+                if l!=14:
+                    plt.plot(h,r_normed[:,0],label="scratch")
+                else:
+                    plt.plot(h,r_normed[:,0],linestyle="dashed")
+
+                ### evaluate transfer neural network trained in two phases
+                plt.plot([],[]) # for right color
+                
+                h = transfer.data[l]["test"]["h"]
+                r_squared = coefficient_of_determination(transfer,l,reduce_energies=True,
+                                                                    key="test",transfer_ind=idx)
+
+                r_squared = r_squared[:,eps_idx]
+                r_normed  = 1/(2-r_squared)
+                if l!=14:
+                    plt.plot(h,r_normed,label="transfer")
+                else:
+                    plt.plot(h,r_normed,linestyle="dashed")
+
+                plt.hlines(0.5,0,16,colors="black",linestyles="dotted")
+                if i>0:
+                    plt.xlabel("Disorder parameter $h$",fontsize="xx-large")
+                plt.xticks(np.arange(1,16,2),fontsize="x-large")
+                if i%2==0:
+                    # set right yticks to right side
+                    plt.gca().yaxis.set_label_position("right")
+                    plt.gca().yaxis.set_ticks_position("right")
+                    plt.yticks(fontsize="x-large")
+                else:
+                    plt.yticks(np.arange(0,11,2)/10,[])
+                if i==2:
+                    plt.ylabel("$R^2_{norm.}$",fontsize="x-large")
+                plt.ylim(0,1)
+                plt.xlim(0,15.5)
+                plt.text(10,0.85,"$L={}$".format(l),fontsize="xx-large")
+                if i==1:
+                    plt.legend(bbox_to_anchor=[0.85,-0.45],fontsize="xx-large")
+    plt.subplots_adjust(wspace=0.15,hspace=0.2)
     if savename is not None:
         plt.savefig(savename+".pdf",orientation="landscape",dpi=600,bbox_inches="tight")
-    plt.show()
-    return
-
-def plot_L_dependent_regression(net,label_idxs=[0,1,2],eps_idx=9,savename=None):
-    for i,idx in enumerate(label_idxs):
-        plt.figure(figsize=(8,6))
-        
-        for j,L in enumerate(net.Lvals):
-            h, singlescores, targets = net.predict_energy_wise(L)
-
-            # average scores over disorder realizations
-            scores = np.mean(singlescores,axis=2)
-            std = np.std(singlescores,axis=2)
-
-            h, means, stds, _ = get_avg(net,L)
-            
-            use_even = np.arange(len(h))%2==0
-            use_odd  = np.bitwise_not(use_even)
-            
-            ax = plt.subplot(221+j)
-            plt.errorbar(h[use_even],scores[eps_idx,use_even,i],
-                         yerr=std[eps_idx,use_even,i],fmt="r.",label="Estimation")
-            plt.errorbar(h[use_odd],means[eps_idx,use_odd,i],
-                         yerr=stds[eps_idx,use_odd,i],fmt="b.",label="Exact diagonalization")        
-            if j==2:
-                plt.xticks(np.arange(2,16,2),fontsize="x-large")
-                plt.xlabel("Disorder parameter $h$",fontsize="xx-large")
-            elif j==1:
-                plt.xticks(np.arange(2,16,2),fontsize="x-large")
-            else:
-                plt.xticks(np.arange(2,16,2),[])
-            #plt.text(*numberpos[i],chr(ord('a')+i)+")",fontsize=22)
-            plt.grid()
-            plt.xlim(1,15)
-            plt.text(0.8,0.8,"$L={}$".format(L),fontsize="xx-large",
-                     horizontalalignment='center',verticalalignment='center', transform=ax.transAxes)
-            
-            #plt.ylim(ylims_dict[i])
-            if j%2==1:
-                # set right yticks to right side
-                plt.gca().yaxis.set_label_position("right")
-                plt.gca().yaxis.set_ticks_position("right")
-            plt.yticks(fontsize="x-large")
-            plt.ylabel(diction[idx],fontsize="xx-large")
-            if j==2:
-                plt.legend(bbox_to_anchor=[1.9,0.65],fontsize="large")
-        
-        plt.subplots_adjust(wspace=0.05,hspace=0.1)
-        if savename is not None:
-            plt.savefig(savename.format(L)+"_{}.pdf".format(i),orientation="landscape",
-                        dpi=600,bbox_inches="tight")
+    if show_plot:
         plt.show()
+    else:
+        plt.close()
     return
 
+def increase_precision(arr,scale_factor,base_scale=2):
+    """ Helper function for creating the phase diagram. Takes a sorted array with a base resolution of base-scale.
+        Returns an array of resolution scale_factor*base_scale with the same start and end point of arr.
+    """
+    mins, maxs = np.min(arr), np.max(arr)
+    assert arr[0] == mins and arr[-1] == maxs, "Array has to be sorted."
+    scale_factor *= base_scale
+    R = (len(arr)-1) / base_scale # range of array
+    N = int(scale_factor*R + 1) # rescale
+    return np.linspace(mins,maxs,N)
+
+def get_phase_diagram_data(net,L_val,scale_factor,eps_train=None,N_samples=1000,h_max=30):
+    assert net.add_energy_density, "Phase diagram only available for architecture with variable energy values."
+    eps_test = increase_precision(net.energies,scale_factor)
+    h = net.data[L_val]["train"]["h"]
+    h = h[h <= h_max]
+    h_test = increase_precision(h,scale_factor)
+    temp = None if eps_train is None else {"eps": eps_train, "h": h}
+    out = {"init": temp, "data": {"eps": net.energies, "h": h}, "net": {"eps": eps_test, "h": h_test}}
+    out["data"]["scale_factor"] = scale_factor
+    # mock data generation
+    seq_division = net.rnn_params["seq_division"]
+    data = []
+    data_std = []
+    for e in eps_test:
+        eps_data = []
+        eps_data_std = []
+        for hval in h_test:
+            # sample, reshape for RNN, then predict
+            temp = np.random.uniform(-hval,hval,size=(N_samples,L_val))
+            temp = from_numpy(get_LSTM_data(temp,seq_division=seq_division))
+            temp = net._predict_data(temp,eps=full((N_samples,1),e)) # eps shift is applied later
+            eps_data.append(np.mean(temp,axis=0))
+            eps_data_std.append(np.std(temp,axis=0))
+        data.append(np.array(eps_data))
+        data_std.append(np.array(eps_data_std))
+    data = np.array(data).T
+    data_std = np.array(data_std).T # N_inds x len(h) x len(eps)
+    out["net"]["data"] = data
+    out["net"]["std"] = data_std
+    
+    # prepare train data from loaded model to compare
+    source = net.data[L_val]["train"]
+    inds = net.sort(source["inds"])
+    data_comp = []
+    data_comp_std = []
+    for temp in inds:
+        h_data = []
+        h_data_std = []
+        for hval in h:
+            keep = source["hcorr"] == hval
+            # keep only the right data for each and average afterwards
+            h_data.append(np.mean(temp[keep],axis=0))
+            h_data_std.append(np.std(temp[keep],axis=0))
+        data_comp.append(np.array(h_data))
+        data_comp_std.append(np.array(h_data_std))
+    data_comp = np.array(data_comp).T
+    data_comp_std = np.array(data_comp_std).T # N_inds x len(h) x len(eps)
+    out["data"]["data"] = data_comp
+    out["data"]["std"] = data_comp_std
+    
+    # if applicable, prepare data used for the training of the net
+    if eps_train is not None:
+        keeps = np.array([e in eps_train for e in net.energies])
+        data_init = []
+        data_init_std = []
+        # keep only the corresponding inds that belong to eps_train
+        for temp in inds[keeps]:
+            h_data = []
+            h_data_std = []
+            for hval in h:
+                keep = source["hcorr"] == hval
+                # keep only the right data for each and average afterwards
+                h_data.append(np.mean(temp[keep],axis=0))
+                h_data_std.append(np.std(temp[keep],axis=0))
+            data_init.append(np.array(h_data))
+            data_init_std.append(np.array(h_data_std))
+        data_init = np.array(data_init).T
+        data_init_std = np.array(data_init_std).T # N_inds x len(h) x len(eps_train)
+        out["init"]["data"] = data_init
+        out["init"]["std"] = data_init_std
+
+    return out
+    
+def plot_from_phase_diag_data(all_data,savename=None,show_plot=False,plot_info={}):
+    aspect0 = plot_info.get("aspect",30/8.25)
+    hspace  = plot_info.get("hspace",-0.3)
+    numberpos = plot_info.get("numberpos",(0.5,0.5))
+    
+    scale_factor = all_data["data"]["scale_factor"]
+    data, eps_vals, h_vals = [], [], []
+    for d in all_data.values():
+        if d is not None:
+            data.append(d["data"])
+            eps_vals.append(d["eps"])
+            h_vals.append(d["h"])
+        else:
+            data.append(None)
+            eps_vals.append(None)
+            h_vals.append(None)
+        
+    if data[0] is not None:
+        for i,diagrams in enumerate(zip(*data)):
+            plt.figure(figsize=(8,8))
+            for j,(diag,axes,scale,offset,axpos,aspect) in enumerate(zip(diagrams,
+                                                        zip(h_vals,eps_vals),
+                                                        (None,4,int(4*scale_factor)),
+                                                        (None,1,int(scale_factor)),
+                                                        ((0,1),(1,0),(1,2)),
+                                                        (aspect0,"equal","equal")
+                                                       )):
+                x,y = diag.shape
+                ax = plt.subplot2grid((2, 4), axpos, 1, 2)
+                ax.imshow(diag.T,aspect=aspect,origin="lower")
+                if scale is not None:
+                    ax.set_xticks(np.arange(offset,x,scale))
+                    ax.set_xticklabels(axes[0][offset::scale].astype(int),fontsize="x-large")
+                    ax.set_yticks(np.arange(offset,y,scale))
+                    ax.set_yticklabels(np.round(axes[1][offset::scale],1),fontsize="x-large")
+                else:
+                    ax.set_xticks(np.arange(1,x,4))
+                    ax.set_xticklabels(axes[0][1::4].astype(int),fontsize="x-large")
+                    ax.set_yticks(np.arange(0,y))
+                    ax.set_yticklabels(np.round(axes[1],1),fontsize="x-large")
+                ax.set_xlabel("Disorder parameter $h$",fontsize="x-large")
+                ax.set_ylabel("Energy density $\\epsilon$",fontsize="x-large")
+                ax.text(*numberpos,chr(ord('a')+j)+")",fontsize=24,color="white",horizontalalignment='center',
+                        verticalalignment='center', transform=ax.transAxes)
+                if j==2:
+                    # set right yticks to right side
+                    plt.gca().yaxis.set_label_position("right")
+                    plt.gca().yaxis.set_ticks_position("right")
+
+            # adjust positioning
+            plt.subplots_adjust(hspace=hspace)
+            if savename is not None:
+                plt.savefig(savename+"_{}.pdf".format(i),orientation="landscape",dpi=600,bbox_inches="tight")
+            if show_plot:   
+                plt.show()
+            else:
+                plt.close()
+    else:
+        # plot data if eps_train is not provided
+        h_vals, eps_vals = h_vals[1:],eps_vals[1:]
+        for i,diagrams in enumerate(zip(*data[1:])):
+            plt.figure(figsize=(8,6))
+            for j,(diag,axes,scale,offset) in enumerate(zip(diagrams,
+                                                            zip(h_vals,eps_vals),
+                                                            (4,int(4*scale_factor)),
+                                                            (1,int(scale_factor))
+                                                           )):
+                x,y = diag.shape
+                ax = plt.subplot(121+j)
+                plt.imshow(diag.T,aspect="equal",origin="lower")
+                plt.xticks(np.arange(offset,x,scale),axes[0][offset::scale].astype(int),fontsize="x-large")
+                plt.xlabel("Disorder parameter $h$",fontsize="xx-large")
+                plt.yticks(np.arange(offset,y,scale),np.round(axes[1][offset::scale],1),fontsize="x-large")
+                plt.ylabel("Energy density $\\epsilon$",fontsize="xx-large")
+                plt.text(*numberpos,chr(ord('a')+j)+")",fontsize=24,color="white",horizontalalignment='center',
+                        verticalalignment='center', transform=ax.transAxes)
+                if j==1:
+                    # set right yticks to right side
+                    plt.gca().yaxis.set_label_position("right")
+                    plt.gca().yaxis.set_ticks_position("right")
+
+            # adjust positioning
+            plt.subplots_adjust(wspace=0.05)
+            if savename is not None:
+                plt.savefig(savename+"_{}.pdf".format(i),orientation="landscape",dpi=600,bbox_inches="tight")
+            if show_plot:   
+                plt.show()
+            else:
+                plt.close()
+    return
+
+def plot_phase_diagram(net,L_val,scale_factor,eps_train=None,N_samples=1000,h_max=30,savename=None,show_plot=False,plot_info={}):
+    out = get_phase_diagram_data(net,L_val,scale_factor,eps_train,N_samples,h_max)
+    plot_from_phase_diag_data(out,savename,show_plot,plot_info)
+    return
